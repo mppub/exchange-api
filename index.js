@@ -1,12 +1,10 @@
 const WebSocket = require('ws');
 const https = require('https');
 const { createHmac } = require('crypto');
-const { setEnvVariablesSync, handleExceptionsAndRejections } = require('./utils.js')
 
+const { setEnvVariablesSync, handleExceptionsAndRejections } = require('./utils')
 
-setEnvVariablesSync();
-handleExceptionsAndRejections()
-
+setEnvVariablesSync()
 const config = {
   testnet: {
     restBaseUrl: 'https://testnet.binance.vision',
@@ -34,9 +32,13 @@ const config = {
   }
 }
 
+handleExceptionsAndRejections()
+
 const getConfigObj = (testnet) => testnet ? config.testnet : config.mainnet
 const getRestApiUrl = (testnet = true) => `${getConfigObj(testnet).restBaseUrl}${getConfigObj(testnet).restApiPathPrefix}`
 const getWsUrl = (listenKey, testnet = true) => `${getConfigObj(testnet).wsBaseUrl}${getConfigObj(testnet).wsWSPathPrefix}/${listenKey}`
+const getWsStreamUrl = (stream, testnet = true) => `${getConfigObj(testnet).wsBaseUrl}/ws/${stream}`
+const getWsStreamsUrl = (streams, testnet = true, suffix = '@trade') => `${getConfigObj(testnet).wsBaseUrl}/stream?streams=${streams.join(`${suffix}/`)}${suffix}`
 
 const getSignature = (data, testnet = true) => {
   const key = getConfigObj(testnet).authentiaction.secretKey
@@ -116,12 +118,11 @@ const getWSListenKey = (refreshListenKey, testnet = true) => {
   })
 }
 
-const createWSClient = (address, state) => {
-  console.log(address)
+const createWSAccountInfo = (address, state) => {
   const ws = new WebSocket(address);
 
   ws.on('open', () => {
-
+    console.log(`WSAccountInfo: open`);
   });
 
   ws.on('message', (data) => {
@@ -133,7 +134,7 @@ const createWSClient = (address, state) => {
       parsedData = JSON.parse(data)
     }
     catch (e) {
-      console.error('WSClient: error while parsing message: ', data)
+      console.error('WSAccountInfo: error while parsing message: ', data)
       throw e;
     }
 
@@ -171,13 +172,32 @@ const createWSClient = (address, state) => {
   });
 
   ws.on('error', (event) => {
-    console.error(`WSClient: error ${error}`)
+    console.error(`WSAccountInfo: error ${error}`)
   });
 
   ws.on('close', (code, reason) => {
-    console.log(`WSClient: close, code: ${code}, reason: ${reason}`)
+    console.log(`WSAccountInfo: close, code: ${code}, reason: ${reason}`)
   });
 }
+
+const createWSMarketsInfo = (address) => {
+  const ws = new WebSocket(address);
+
+  ws.on('open', () => {
+    console.log(`WSMarketsInfo: open`);
+  });
+
+  ws.on('message', (data) => {});
+
+  ws.on('error', (event) => {
+    console.error(`WSMarketsInfo: error ${error}`)
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`WSMarketsInfo: close, code: ${code}, reason: ${reason}`)
+  });
+}
+
 
 const periodicallyRefreshListenKey = (listenKeyToRefresh, interval = config.testnet.authentiaction.wsKeyRefreshInterval) => {
   const callbackFn = (consecutiveErrorsCount = 0) => {
@@ -244,7 +264,7 @@ const getExchangeInfo = (testnet = true) => {
 
 const getTheXMostTradedPairsByRelativeVolume = async (testnet = true, max = 10) => {
   const output = [];
-  const stats24 = await get24HStats(false);
+  const stats24 = await get24HStats(false)
   stats24.sort((a, b) => Number(b.volume) - Number(a.volume))
 
   for (let i = 0; i < max; i++) {
@@ -310,6 +330,49 @@ const getTheXMostTradedPairsByVolumeInSymbol = async (testnet = true, max = 10, 
   return output;
 }
 
+const latencyStats = {
+  ttfbRequests: BigInt(0),
+  ttfbSum: BigInt(0),
+  ttfb: {
+    min: null,
+    max: null,
+    mean: null
+  }
+}
+const nsMsDivisor = BigInt(Math.pow(10,6))
+
+const latencyTracker = (testnet = true) => {
+  const start = process.hrtime.bigint();
+  https.get(`${getRestApiUrl(testnet)}ping`, {}, (res) => {
+    let output
+    res.once('readable', () => {
+      const ttfb = process.hrtime.bigint() - start;
+      latencyStats.ttfbRequests++;
+      latencyStats.ttfbSum += ttfb;
+      if (!latencyStats.ttfb.min) {
+        latencyStats.ttfb = {
+          min: ttfb,
+          max: ttfb,
+          mean: ttfb
+        }
+      } else {
+        latencyStats.ttfb = {
+          min: ttfb < latencyStats.ttfb.min ? ttfb : latencyStats.ttfb.min,
+          max: ttfb > latencyStats.ttfb.max ? ttfb : latencyStats.ttfb.max,
+          mean: latencyStats.ttfbSum / latencyStats.ttfbRequests
+        }
+      }
+      console.log(`TTFB in ns - mean: ${latencyStats.ttfb.mean}, max: ${latencyStats.ttfb.max}, min: ${latencyStats.ttfb.min}`)
+      console.log(`TTFB in ms - mean: ${latencyStats.ttfb.mean / nsMsDivisor}, max: ${latencyStats.ttfb.max / nsMsDivisor}, min: ${latencyStats.ttfb.min / nsMsDivisor}`)
+    })
+    res.on('data', (chunk) => { output += chunk })
+    res.on('end', () => {})
+  }).on('error', (error) => {
+    console.error(`latencyTracker: req`);
+    reject(error);
+  })
+}
+
 
 
 (async () => {
@@ -327,7 +390,6 @@ const getTheXMostTradedPairsByVolumeInSymbol = async (testnet = true, max = 10, 
     .forEach((element) => {
       state.spot.nonZeroBalances[`${element.asset}`] = { free: element.free, locked: element.locked }
     });
-
   console.log(`Current non-zero spot account balances: `, state.spot.nonZeroBalances)
 
   /*
@@ -338,26 +400,30 @@ const getTheXMostTradedPairsByVolumeInSymbol = async (testnet = true, max = 10, 
    */
   const listenKey = await getWSListenKey()
   periodicallyRefreshListenKey(listenKey)
-  createWSClient(getWsUrl(listenKey), state)
+  createWSAccountInfo(getWsUrl(listenKey), state)
 
   /*
     Tasks:
-      - TODO: "Open 10 *@trade websockets for the 10 pairs with the highest volume in the last 24h on the SPOT exchange (mainnet)"
+      - "Open 10 *@trade websockets for the 10 pairs with the highest volume in the last 24h on the SPOT exchange (mainnet)"
       - "Determinate the 10 pairs dynamically (no hard-coded pairs)"
 
     The 10 pairs could be interpreted in multiple ways, the most logical is to assume the volume in some representative stablecoin/fiat volume,
     if you would like to simply see the results by the relative volume of the pair please the call of getTheXMostTradedPairsByRelativeVolume() fn
     anyway both of those algorithms have big O complexity time (n * log(n)) due to native Array.sort call which is basically a merge sort
    */
-  // const most10TradedPairsStats = await getTheXMostTradedPairsByVolumeInSymbol() // or -> getTheXMostTradedPairsByRelativeVolume()
-  // const most10TradedPairs = most10TradedPairsStats.map((el) => el.symbol)
-  // console.log(most10TradedPairs)
+  const most10TradedPairsStats = await getTheXMostTradedPairsByVolumeInSymbol(false) // or -> getTheXMostTradedPairsByRelativeVolume()
+  const most10TradedPairs = most10TradedPairsStats.map((el) => el.symbol.toLocaleLowerCase())
+  const wsStreamUrl = getWsStreamsUrl(most10TradedPairs, false)
+  console.log(`Opening @trade streams: ${most10TradedPairs.join(', ')}`)
+  createWSMarketsInfo(wsStreamUrl)
 
   /*
-    Task: TODO: "Measure event time => client receive time latency and log (min/mean/max) to console every 1 minute"
+    Task: "Measure event time => client receive time latency and log (min/mean/max) to console every 1 minute"
    */
-
-  // https://binance-docs.github.io/apidocs/spot/en/#test-connectivity
+  latencyTracker()
+  const intervalID = setInterval(() => {
+    latencyTracker()
+  }, 60 * 1000)
 })()
 
 
