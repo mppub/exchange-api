@@ -1,44 +1,18 @@
 const WebSocket = require('ws');
 const https = require('https');
 const { createHmac } = require('crypto');
-
-const { setEnvVariablesSync, handleExceptionsAndRejections } = require('./utils')
-
-setEnvVariablesSync()
-const config = {
-  testnet: {
-    restBaseUrl: 'https://testnet.binance.vision',
-    restApiPathPrefix: '/api/v3/',
-    wsBaseUrl: 'wss://testnet.binance.vision',
-    wsWSPathPrefix: '/ws',
-    wsStreamPath: '/stream',
-    authentiaction: {
-      apiKey: process.env.TESTNET_API_KEY,
-      secretKey: process.env.TESTNET_SECRET_KEY,
-      wsKeyRefreshInterval: 30 * 60 * 1000
-    }
-  },
-  mainnet: {
-    restBaseUrl: 'https://api.binance.com',
-    restApiPathPrefix: '/api/v3/',
-    wsBaseUrl: 'wss://stream.binance.com:9443',
-    wsWSPathPrefix: '/ws',
-    wsStreamPath: '/stream',
-    authentiaction: {
-      apiKey: process.env.MAINNET_API_KEY,
-      secretKey: process.env.MAINNET_SECRET_KEY,
-      wsKeyRefreshInterval: 30 * 60 * 1000
-    }
-  }
-}
+const {
+  getConfigObj,
+  getRestApiUrl,
+  getWsUrl,
+  getWsStreamsUrl,
+  getWsKeyRefreshInterval
+} = require('./config.js')
+const { handleExceptionsAndRejections } = require('./utils.js')
+const latencyTracker = require('./latencyTracker.js')
 
 handleExceptionsAndRejections()
 
-const getConfigObj = (testnet) => testnet ? config.testnet : config.mainnet
-const getRestApiUrl = (testnet = true) => `${getConfigObj(testnet).restBaseUrl}${getConfigObj(testnet).restApiPathPrefix}`
-const getWsUrl = (listenKey, testnet = true) => `${getConfigObj(testnet).wsBaseUrl}${getConfigObj(testnet).wsWSPathPrefix}/${listenKey}`
-const getWsStreamUrl = (stream, testnet = true) => `${getConfigObj(testnet).wsBaseUrl}/ws/${stream}`
-const getWsStreamsUrl = (streams, testnet = true, suffix = '@trade') => `${getConfigObj(testnet).wsBaseUrl}/stream?streams=${streams.join(`${suffix}/`)}${suffix}`
 
 const getSignature = (data, testnet = true) => {
   const key = getConfigObj(testnet).authentiaction.secretKey
@@ -49,7 +23,6 @@ const getSignature = (data, testnet = true) => {
   const hmac = createHmac('sha256', key);
   return hmac.update(data).digest('hex');
 }
-
 const getSignatureDataParam = (queryString, body) => queryString + ( body ? JSON.stringify(body) : '')
 
 const getSpotAccountInfo = (testnet = true) => {
@@ -81,8 +54,6 @@ const getSpotAccountInfo = (testnet = true) => {
     })
   })
 }
-
-
 
 const getWSListenKey = (refreshListenKey, testnet = true) => {
   return new Promise((resolve, reject) => {
@@ -151,7 +122,7 @@ const createWSAccountInfo = (address, state) => {
         console.log(`Current non-zero spot account balances: `, state.spot.nonZeroBalances)
         break;
       /*
-      note: can not test this on testnet and not 100% sure, that the "d"(Balance Delta) param actually mean the asset change and can have negative values, I would just do:
+      note: can not test 'balanceUpdate' event on testnet yet and not 100% sure, that the "d"(Balance Delta) param actually mean the asset change and can have negative values, I would just do:
 
       case 'balanceUpdate':
         const currentBalanceObj = state.spot.nonZeroBalances[`${parsedData.a}`]
@@ -199,7 +170,7 @@ const createWSMarketsInfo = (address) => {
 }
 
 
-const periodicallyRefreshListenKey = (listenKeyToRefresh, interval = config.testnet.authentiaction.wsKeyRefreshInterval) => {
+const periodicallyRefreshListenKey = (listenKeyToRefresh, interval = getWsKeyRefreshInterval()) => {
   const callbackFn = (consecutiveErrorsCount = 0) => {
     getWSListenKey(listenKeyToRefresh).then(() => {
       periodicallyRefreshListenKey(listenKeyToRefresh);
@@ -330,51 +301,6 @@ const getTheXMostTradedPairsByVolumeInSymbol = async (testnet = true, max = 10, 
   return output;
 }
 
-const latencyStats = {
-  ttfbRequests: BigInt(0),
-  ttfbSum: BigInt(0),
-  ttfb: {
-    min: null,
-    max: null,
-    mean: null
-  }
-}
-const nsMsDivisor = BigInt(Math.pow(10,6))
-
-const latencyTracker = (testnet = true) => {
-  const start = process.hrtime.bigint();
-  https.get(`${getRestApiUrl(testnet)}ping`, {}, (res) => {
-    let output
-    res.once('readable', () => {
-      const ttfb = process.hrtime.bigint() - start;
-      latencyStats.ttfbRequests++;
-      latencyStats.ttfbSum += ttfb;
-      if (!latencyStats.ttfb.min) {
-        latencyStats.ttfb = {
-          min: ttfb,
-          max: ttfb,
-          mean: ttfb
-        }
-      } else {
-        latencyStats.ttfb = {
-          min: ttfb < latencyStats.ttfb.min ? ttfb : latencyStats.ttfb.min,
-          max: ttfb > latencyStats.ttfb.max ? ttfb : latencyStats.ttfb.max,
-          mean: latencyStats.ttfbSum / latencyStats.ttfbRequests
-        }
-      }
-      console.log(`TTFB in ns - mean: ${latencyStats.ttfb.mean}, max: ${latencyStats.ttfb.max}, min: ${latencyStats.ttfb.min}`)
-      console.log(`TTFB in ms - mean: ${latencyStats.ttfb.mean / nsMsDivisor}, max: ${latencyStats.ttfb.max / nsMsDivisor}, min: ${latencyStats.ttfb.min / nsMsDivisor}`)
-    })
-    res.on('data', (chunk) => { output += chunk })
-    res.on('end', () => {})
-  }).on('error', (error) => {
-    console.error(`latencyTracker: req`);
-    reject(error);
-  })
-}
-
-
-
 (async () => {
   /*
     Task: "Log to console current non 0 asset balances available on the SPOT account (testnet)"
@@ -407,7 +333,7 @@ const latencyTracker = (testnet = true) => {
       - "Open 10 *@trade websockets for the 10 pairs with the highest volume in the last 24h on the SPOT exchange (mainnet)"
       - "Determinate the 10 pairs dynamically (no hard-coded pairs)"
 
-    The 10 pairs could be interpreted in multiple ways, the most logical is to assume the volume in some representative stablecoin/fiat volume,
+    Note: The 10 pairs could be interpreted in multiple ways, the most logical is to assume the volume in some representative stablecoin/fiat volume,
     if you would like to simply see the results by the relative volume of the pair please the call of getTheXMostTradedPairsByRelativeVolume() fn
     anyway both of those algorithms have big O complexity time (n * log(n)) due to native Array.sort call which is basically a merge sort
    */
